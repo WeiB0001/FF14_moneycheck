@@ -265,6 +265,11 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
     </div>
   </div>
 
+  <section class="panel">
+    <div class="sync"><h3>連線測試</h3><button id="diagBtn">開始測試</button></div>
+    <pre id="diag" class="note" style="white-space:pre-wrap;margin:0;font-family:var(--f-num);font-size:12px">版本 v6 · 抓不到資料時按這裡，把結果截圖傳給我。</pre>
+  </section>
+
   <details>
     <summary>怎麼判斷「賣出」？</summary>
     <p class="note">成交紀錄只記買家、不記賣家，所以這頁是先找出「你僱員有上架的東西」再追蹤：每次檢查會掃描泰坦最近被看過的 200 樣物品，網頁開著時也會即時接收整個伺服器的上架變動，看到你僱員的名字就自動加入。資料來自 Universalis，是玩家打開市場板時上傳的。每次檢查時，這頁會記住你僱員在架上的每一筆。下次檢查時某一筆不見了，而且成交紀錄裡有一筆同價格、同數量的交易，就記為「賣出」，時間用成交紀錄上的時間；找不到對應成交的，記為「下架」，通常是你自己收回或改價，不算進收入。<br><br>
@@ -359,7 +364,8 @@ $("tabMarket").addEventListener("click",function(){setTab("market");});
 $("tabLedger").addEventListener("click",function(){setTab("ledger");});
 
 /* fetch + compare */
-var busy=false;
+var busy=false,blocked=null;
+window.addEventListener("securitypolicyviolation",function(e){if(/universalis/.test(e.blockedURI||"")||e.blockedURI==="")blocked=e.violatedDirective||"connect-src";});
 function setStatus(t,err){var s=$("status");s.textContent=t;s.className="status"+(err?" err":"");}
 async function fetchBatch(ids,entries){
   var r=await fetch(API+S.world+"/"+ids.join(",")+"?entries="+(entries||40));
@@ -432,7 +438,10 @@ async function refresh(){
     save();
     setStatus((newSold?"新賣出 "+newSold+" 筆！":"沒有新的賣出")+(found?" · 新找到 "+found+" 樣你在賣的東西":"")+" · "+stamp(now)+" 檢查");
   }catch(e){
-    setStatus("抓不到資料（"+e.message+"）。確認手機有網路，過一下再試。",true);
+    var local=location.protocol==="file:"||location.origin==="null"||!/^https?:$/.test(location.protocol);
+    setStatus(local?"這個網頁是直接開檔案或在預覽裡打開的，瀏覽器不讓它連到市場資料。請把它放到網址上（例如 GitHub Pages）再用瀏覽器打開。"
+             :blocked?"放這個網頁的網站（"+location.hostname+"）禁止網頁連到外部網站（"+blocked+"），所以抓不到市場資料。請改放到 GitHub Pages。"
+             :"抓不到資料（"+e.message+"）。不是網站封鎖造成的，可能是 Universalis 拒絕連線或暫時故障，請把這段訊息傳給我。",true);
   }
   busy=false;$("refresh").disabled=false;render();
 }
@@ -470,6 +479,23 @@ $("live").checked=!!S.live;
 $("live").addEventListener("change",function(){S.live=$("live").checked;save();startLive();});
 document.addEventListener("visibilitychange",function(){if(document.hidden)stopLive();else startLive();});
 
+$("diagBtn").addEventListener("click",async function(){
+  var out=["版本 v6","網址 "+location.href,"瀏覽器 "+navigator.userAgent,"網頁封鎖紀錄 "+(blocked||"無")];
+  $("diag").textContent=out.join("\n")+"\n測試中…";
+  async function probe(label,url){
+    var t0=Date.now();
+    try{var r=await fetch(url,{cache:"no-store"});var txt=await r.text();
+      out.push("✓ "+label+"：HTTP "+r.status+"，"+txt.length+" 字，"+(Date.now()-t0)+"ms");}
+    catch(e){out.push("✗ "+label+"："+e.name+" "+e.message+"，"+(Date.now()-t0)+"ms");}
+    $("diag").textContent=out.join("\n");
+  }
+  await probe("一般網路（GitHub API）","https://api.github.com/zen");
+  await probe("Universalis 伺服器清單","https://universalis.app/api/v2/worlds");
+  await probe("Universalis 泰坦市場","https://universalis.app/api/v2/"+S.world+"/2?listings=1&entries=1");
+  await probe("Universalis 最近更新","https://universalis.app/api/v2/extra/stats/most-recently-updated?world="+S.world+"&entries=5");
+  out.push("BSON 套件 "+(window.BSON?"有載入":"沒載入"));
+  $("diag").textContent=out.join("\n");
+});
 $("showGone").addEventListener("click",function(){S.showGone=!S.showGone;save();render();});
 
 $("clearLog").addEventListener("click",function(){$("clearConfirm").hidden=false;});
