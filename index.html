@@ -188,6 +188,10 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
       </div>
       <div class="status" id="status">按「檢查市場」抓最新資料。</div>
       <div class="status" id="liveStatus" hidden></div>
+      <div class="sync" style="gap:8px">
+        <div class="status" id="scanStatus">還沒做過完整掃描。</div>
+        <button id="scanBtn">完整掃描</button>
+      </div>
       <div class="seg small" role="tablist" id="daySeg"></div>
       <div class="summary">
         <div class="stat"><div class="v" id="sOn">0</div><div class="k">目前架上</div></div>
@@ -267,7 +271,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
 
   <section class="panel">
     <div class="sync"><h3>連線測試</h3><button id="diagBtn">開始測試</button></div>
-    <pre id="diag" class="note" style="white-space:pre-wrap;margin:0;font-family:var(--f-num);font-size:12px">版本 v6 · 抓不到資料時按這裡，把結果截圖傳給我。</pre>
+    <pre id="diag" class="note" style="white-space:pre-wrap;margin:0;font-family:var(--f-num);font-size:12px">版本 v7 · 抓不到資料時按這裡，把結果截圖傳給我。</pre>
   </section>
 
   <details>
@@ -286,7 +290,7 @@ var API="https://universalis.app/api/v2/";
 var ITEMS=JSON.parse(document.getElementById("itemdb").textContent);
 var NAME={}; ITEMS.forEach(function(r){NAME[r[0]]=r[1];});
 var KEY="retainer-ledger-v1";
-var DEFAULT={world:4035,retainers:[],watch:[],snap:{},log:[],auto:false,data:{},tab:"market",day:0,period:7,sort:"gil",showGone:true,live:true,autoIds:{},lastMine:{},scanned:{}};
+var DEFAULT={world:4035,retainers:[],watch:[],snap:{},log:[],auto:false,data:{},tab:"market",day:0,period:7,sort:"gil",showGone:true,live:true,lastFull:0,autoIds:{},lastMine:{},scanned:{}};
 var S=load();
 if(Array.isArray(S.log))S.log.sort(function(a,b){return b.t-a.t;});else S.log=[];
 var $=function(id){return document.getElementById(id);};
@@ -316,7 +320,7 @@ function sold(){return S.log.filter(function(l){return l.kind==="sold";});}
 var worldSel=$("world");
 WORLDS.forEach(function(w){var o=el("option",null,w[1]);o.value=w[0];worldSel.appendChild(o);});
 worldSel.value=S.world;
-worldSel.addEventListener("change",function(){S.world=+worldSel.value;S.snap={};S.data={};S.watch=[];S.autoIds={};S.scanned={};save();render();if(typeof startLive==="function")startLive();});
+worldSel.addEventListener("change",function(){S.world=+worldSel.value;S.snap={};S.data={};S.watch=[];S.autoIds={};S.scanned={};S.lastFull=0;save();render();if(typeof startLive==="function")startLive();});
 var setPanel=$("settings"),tog=$("toggleSettings");
 function showSettings(v){setPanel.hidden=!v;tog.setAttribute("aria-expanded",String(v));tog.textContent=v?"收起設定":"設定";}
 showSettings(S.retainers.length===0);
@@ -324,7 +328,7 @@ tog.addEventListener("click",function(){showSettings(setPanel.hidden);});
 
 function addRetainer(){
   var v=$("retainerInput").value.trim();
-  if(v&&S.retainers.indexOf(v)<0){S.retainers.push(v);S.scanned={};save();render();startLive();refresh();}
+  if(v&&S.retainers.indexOf(v)<0){S.retainers.push(v);S.scanned={};S.lastFull=0;save();render();startLive();refresh().then(fullScan);}
   $("retainerInput").value="";
 }
 $("addRetainer").addEventListener("click",addRetainer);
@@ -367,36 +371,22 @@ $("tabLedger").addEventListener("click",function(){setTab("ledger");});
 var busy=false,blocked=null;
 window.addEventListener("securitypolicyviolation",function(e){if(/universalis/.test(e.blockedURI||"")||e.blockedURI==="")blocked=e.violatedDirective||"connect-src";});
 function setStatus(t,err){var s=$("status");s.textContent=t;s.className="status"+(err?" err":"");}
-var lastRequestError=null;
-async function requestJSON(url){
-  for(var attempt=0;attempt<2;attempt++){
-    var controller=new AbortController(),timeout=setTimeout(function(){controller.abort();},20000);
-    try{
-      var r=await fetch(url,{signal:controller.signal});
-      if(!r.ok){var http=new Error("HTTP "+r.status);http.status=r.status;throw http;}
-      return await r.json();
-    }catch(e){
-      var message=e.name==="AbortError"?"連線逾時（20 秒）":e.message;
-      var error=new Error(message+"；請求："+url);error.status=e.status;
-      lastRequestError=error.message;
-      if(attempt===1||(e.status&&e.status!==429&&e.status<500)||e instanceof SyntaxError)throw error;
-    }finally{clearTimeout(timeout);}
-    await new Promise(function(resolve){setTimeout(resolve,1500);});
-  }
-}
 async function fetchBatch(ids,entries){
-  var j=await requestJSON(API+encodeURIComponent(S.world)+"/"+ids.join(",")+"?entries="+(entries==null?40:entries));
+  var r=await fetch(API+S.world+"/"+ids.join(",")+"?entries="+(entries||40));
+  if(!r.ok)throw new Error("HTTP "+r.status);
+  var j=await r.json();
   if(j.items)return j.items;
-  if(!j.itemID)throw new Error("市場 API 回傳格式不符");
   var o={};o[j.itemID]=j;return o;
 }
 async function discover(){
   // scan the world's most recently viewed items for listings by my retainers
-  var j=await requestJSON(API+"extra/stats/most-recently-updated?world="+encodeURIComponent(S.world)+"&entries=200"),cand=[];
+  var r=await fetch(API+"extra/stats/most-recently-updated?world="+S.world+"&entries=200");
+  if(!r.ok)return 0;
+  var j=await r.json(),cand=[];
   (j.items||[]).forEach(function(x){if(S.watch.indexOf(x.itemID)<0&&S.scanned[x.itemID]!==x.lastUploadTime)cand.push(x);});
   var found=0;
-  for(var i=0;i<cand.length;i+=20){
-    var part=cand.slice(i,i+20),data=await fetchBatch(part.map(function(x){return x.itemID;}),1);
+  for(var i=0;i<cand.length;i+=100){
+    var part=cand.slice(i,i+100),data=await fetchBatch(part.map(function(x){return x.itemID;}),1);
     part.forEach(function(x){
       S.scanned[x.itemID]=x.lastUploadTime;
       var d=data[x.itemID];if(!d)return;
@@ -411,11 +401,9 @@ async function refresh(){
   if(busy||(!S.watch.length&&!S.retainers.length))return;
   busy=true;$("refresh").disabled=true;setStatus("正在抓市場資料…");
   try{
-    var found=0,discoveryError=null;
-    if(S.retainers.length){try{found=await discover();}catch(e){discoveryError=e;}}
-    if(discoveryError&&!S.watch.length)throw discoveryError;
+    var found=S.retainers.length?await discover():0;
     var out={};
-    for(var i=0;i<S.watch.length;i+=20){Object.assign(out,await fetchBatch(S.watch.slice(i,i+20)));}
+    for(var i=0;i<S.watch.length;i+=100){Object.assign(out,await fetchBatch(S.watch.slice(i,i+100)));}
     var now=Date.now(),newSold=0;
     S.watch.forEach(function(id){
       var d=out[id];if(!d)return;
@@ -452,12 +440,12 @@ async function refresh(){
     S.log.sort(function(a,b){return b.t-a.t;});
     S.log=S.log.slice(0,3000);
     save();
-    setStatus((newSold?"新賣出 "+newSold+" 筆！":"沒有新的賣出")+(found?" · 新找到 "+found+" 樣你在賣的東西":"")+" · "+stamp(now)+" 檢查"+(discoveryError?"；已追蹤物品已更新，但自動搜尋失敗："+discoveryError.message:""),!!discoveryError);
+    setStatus((newSold?"新賣出 "+newSold+" 筆！":"沒有新的賣出")+(found?" · 新找到 "+found+" 樣你在賣的東西":"")+" · "+stamp(now)+" 檢查");
   }catch(e){
     var local=location.protocol==="file:"||location.origin==="null"||!/^https?:$/.test(location.protocol);
-    setStatus(local?"目前是檔案或預覽模式，可能限制外部連線。請使用 GitHub Pages 網址重試。"
+    setStatus(local?"這個網頁是直接開檔案或在預覽裡打開的，瀏覽器不讓它連到市場資料。請把它放到網址上（例如 GitHub Pages）再用瀏覽器打開。"
              :blocked?"放這個網頁的網站（"+location.hostname+"）禁止網頁連到外部網站（"+blocked+"），所以抓不到市場資料。請改放到 GitHub Pages。"
-             :"抓不到資料（"+e.message+"）。瀏覽器未提供確切原因，可能涉及網路、跨來源限制或服務拒絕連線。請執行連線診斷並提供結果。",true);
+             :"抓不到資料（"+e.message+"）。不是網站封鎖造成的，可能是 Universalis 拒絕連線或暫時故障，請把這段訊息傳給我。",true);
   }
   busy=false;$("refresh").disabled=false;render();
 }
@@ -467,6 +455,49 @@ $("auto").checked=!!S.auto;
 function setAuto(){clearInterval(timer);timer=null;if(S.auto)timer=setInterval(function(){if(!document.hidden)refresh();},300000);}
 $("auto").addEventListener("change",function(){S.auto=$("auto").checked;save();setAuto();});
 document.addEventListener("visibilitychange",function(){if(!document.hidden&&S.auto)refresh();});
+/* full scan: every marketable item on the world, only retainer names */
+var scanning=false;
+function scanText(t){$("scanStatus").textContent=t;}
+function scanIdle(){scanText(S.lastFull?"上次完整掃描："+stamp(S.lastFull)+"。新上架的東西要有人在遊戲裡看過才掃得到。":"還沒做過完整掃描。");}
+async function fullScan(){
+  if(scanning||!S.retainers.length)return;
+  scanning=true;$("scanBtn").disabled=true;scanText("準備完整掃描…");
+  try{
+    var r=await fetch(API+"marketable");if(!r.ok)throw new Error("HTTP "+r.status);
+    var ids=(await r.json()).filter(function(id){return S.watch.indexOf(id)<0;});
+    var batches=[];for(var i=0;i<ids.length;i+=100)batches.push(ids.slice(i,i+100));
+    var next=0,done=0,found=0,failed=0;
+    async function one(b){
+      var u=API+S.world+"/"+b.join(",")+"?entries=0&fields=items.listings.retainerName";
+      if(b.length===1)u=API+S.world+"/"+b[0]+"?entries=0&fields=listings.retainerName";
+      for(var tries=0;tries<3;tries++){
+        try{var res=await fetch(u);
+          if(res.status===429){await new Promise(function(z){setTimeout(z,2000);});continue;}
+          if(!res.ok)throw new Error(res.status);
+          var j=await res.json(),items=j.items||(function(){var o={};o[b[0]]=j;return o;})();
+          Object.keys(items).forEach(function(k){
+            var id=+k,d=items[k];
+            if(d&&(d.listings||[]).some(function(l){return isMine(l.retainerName);})&&S.watch.indexOf(id)<0){
+              S.watch.push(id);S.autoIds[id]=Date.now();found++;}
+          });
+          return;
+        }catch(e){await new Promise(function(z){setTimeout(z,1500);});}
+      }
+      failed++;
+    }
+    async function worker(){while(next<batches.length){var b=batches[next++];await one(b);done++;
+      scanText("完整掃描中 "+Math.round(done/batches.length*100)+"% · 已找到 "+found+" 樣");}}
+    await Promise.all([worker(),worker(),worker(),worker()]);
+    S.lastFull=Date.now();save();
+    scanning=false;$("scanBtn").disabled=false;
+    scanIdle();setStatus("完整掃描完成，新找到 "+found+" 樣"+(failed?"（有 "+failed+" 批沒掃到，可以再掃一次）":"")+"，正在更新價格…");
+    render();await refresh();
+  }catch(e){
+    scanning=false;$("scanBtn").disabled=false;scanText("完整掃描失敗（"+e.message+"），稍後再試。");
+  }
+}
+$("scanBtn").addEventListener("click",fullScan);
+
 /* live stream: Universalis pushes listing changes for the whole world */
 var ws=null,liveCount=0,pend={},pendTimer=null;
 function liveStatus(t){var s=$("liveStatus");s.hidden=!t;s.textContent=t||"";}
@@ -496,12 +527,12 @@ $("live").addEventListener("change",function(){S.live=$("live").checked;save();s
 document.addEventListener("visibilitychange",function(){if(document.hidden)stopLive();else startLive();});
 
 $("diagBtn").addEventListener("click",async function(){
-  var out=["版本 v7", "最近失敗請求 "+(lastRequestError||"無"),"網址 "+location.href,"瀏覽器 "+navigator.userAgent,"網頁封鎖紀錄 "+(blocked||"無")];
+  var out=["版本 v7","網址 "+location.href,"瀏覽器 "+navigator.userAgent,"網頁封鎖紀錄 "+(blocked||"無")];
   $("diag").textContent=out.join("\n")+"\n測試中…";
   async function probe(label,url){
     var t0=Date.now();
     try{var r=await fetch(url,{cache:"no-store"});var txt=await r.text();
-      out.push((r.ok?"✓ ":"✗ ")+label+"：HTTP "+r.status+"，"+txt.length+" 字，"+(Date.now()-t0)+"ms");}
+      out.push("✓ "+label+"：HTTP "+r.status+"，"+txt.length+" 字，"+(Date.now()-t0)+"ms");}
     catch(e){out.push("✗ "+label+"："+e.name+" "+e.message+"，"+(Date.now()-t0)+"ms");}
     $("diag").textContent=out.join("\n");
   }
@@ -677,8 +708,8 @@ function render(){
   });
   if(S.tab==="ledger")renderLedger();else renderMarket();
 }
-setTab(S.tab==="ledger"?"ledger":"market");setAuto();startLive();
-refresh();
+setTab(S.tab==="ledger"?"ledger":"market");setAuto();startLive();scanIdle();
+refresh().then(function(){if(S.retainers.length&&Date.now()-(S.lastFull||0)>12*3600e3)fullScan();});
 })();
 </script>
 </body>
